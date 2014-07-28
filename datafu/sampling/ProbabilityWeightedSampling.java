@@ -49,6 +49,11 @@ public class ProbabilityWeightedSampling {
             return this.score;
         }
 
+        double calculateBaselineScore(double upperBound) {
+            this.score = 1.0 - Math.pow(this.randomFactor, 1.0 * upperBound / this.weight);
+            return this.score;
+        }
+
         @Override
         public int hashCode() {
             return this.id;
@@ -551,6 +556,26 @@ public class ProbabilityWeightedSampling {
         }
     }
 
+    private static void generateBaselineWeightDistribution(List<Sample> samples,
+            double p,
+            double globalUpperBound,
+            Map<Integer, Integer> baselineCountMap,
+            Map<Integer, Sample> sampleMap) throws IOException {
+        List<Sample> orderedSamples = new ArrayList<Sample>(samples.size());
+        for (Sample sample : samples) {
+            sample.calculateBaselineScore(globalUpperBound);
+            orderedSamples.add(sample);
+        }
+        Collections.sort(orderedSamples, new SampleScoreComparator());
+        int s = (int)Math.ceil(p * samples.size()); // sample size
+        for (Sample sample: orderedSamples.subList(0, s)) {
+            if (!baselineCountMap.containsKey(sample.id)) {
+                baselineCountMap.put(sample.id, 0);
+            }
+            baselineCountMap.put(sample.id, baselineCountMap.get(sample.id) + 1);
+        }
+    }
+
     private static final int GAUSSIAN_SAMPLE = 0;
     private static final int UNIFORM_SAMPLE = 1;
     private static final int EQUAL_SAMPLE = 2;
@@ -567,11 +592,21 @@ public class ProbabilityWeightedSampling {
 
         String outputFile = args[4];
 
+        String baselineOutputFile = args[5];
+
         double err = 0.00001;
 
         List<Sample> samples = genInputSamples(sampleCount, sampleWeightDistribution);
 
-        ProbabilityWeightedSampling sorter = new ProbabilityWeightedSampling();
+        Map<Integer, Integer> baselineCountMap = new HashMap<Integer, Integer>();
+        for (Sample sample : samples) {
+            baselineCountMap.put(sample.id, 0);
+        }
+
+        Map<Integer, Sample> sampleMap = new HashMap<Integer, Sample>();
+        for (Sample sample: samples) {
+            sampleMap.put(sample.id, sample);
+        }
 
         Map<Integer, Integer> countMap = new HashMap<Integer, Integer>();
 
@@ -579,11 +614,7 @@ public class ProbabilityWeightedSampling {
             countMap.put(sample.id, 0);
         }
 
-        Map<Integer, Sample> sampleMap = new HashMap<Integer, Sample>();
-
-        for (Sample sample: samples) {
-            sampleMap.put(sample.id, sample);
-        }
+        ProbabilityWeightedSampling sorter = new ProbabilityWeightedSampling();
 
         List<Integer> selectedCounts = new ArrayList<Integer>();
         List<Integer> rejectedCounts = new ArrayList<Integer>();
@@ -676,6 +707,13 @@ public class ProbabilityWeightedSampling {
             rejectedCounts.add(numRejectedItems);
             reducerInputCounts.add(numReducerInputItems);
             acceptedCounts.add(numAcceptedItems);
+
+            //generate baseline weight-frequency distribution
+            generateBaselineWeightDistribution(samples,
+                    p,
+                    globalUpperBound,
+                    baselineCountMap,
+                    sampleMap);
         }
 
         FileWriter fw = new FileWriter(outputFile);
@@ -743,6 +781,16 @@ public class ProbabilityWeightedSampling {
                 "\t" + avgReducerInputCount / selectedCounts.size());
 
         fw.close();
+
+        FileWriter bfw = new FileWriter(baselineOutputFile);
+
+        for (Integer key : baselineCountMap.keySet()) {
+            //System.out.println(sampleMap.get(key).weight + "\t" + countMap.get(key));
+            bfw.write(sampleMap.get(key).weight + "\t" + baselineCountMap.get(key));
+            bfw.write("\r\n");
+        }
+
+        bfw.close();
     }
 }
 
