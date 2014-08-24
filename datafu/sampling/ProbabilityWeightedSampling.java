@@ -54,6 +54,11 @@ public class ProbabilityWeightedSampling {
             return this.score;
         }
 
+        double calculateUnweightedUniformSampleScore() {
+            this.score = this.randomFactor;
+            return this.score;
+        }
+
         @Override
         public int hashCode() {
             return this.id;
@@ -79,7 +84,6 @@ public class ProbabilityWeightedSampling {
         int numRejectedItems;
         double sumOfWeights;
         double upperBound;
-        boolean useGlobalUpperBound;
         double q1;
         double q2;
 
@@ -89,7 +93,6 @@ public class ProbabilityWeightedSampling {
                 int numItems,
                 int numRejectedItems,
                 double sumOfWeights,
-                boolean useGlobalUpperBound,
                 double upperBound,
                 double q1,
                 double q2) {
@@ -99,7 +102,6 @@ public class ProbabilityWeightedSampling {
             this.numItems = numItems;
             this.numRejectedItems = numRejectedItems;
             this.sumOfWeights = sumOfWeights;
-            this.useGlobalUpperBound = useGlobalUpperBound;
             this.upperBound = upperBound;
             this.q1 = q1;
             this.q2 = q2;
@@ -117,11 +119,10 @@ public class ProbabilityWeightedSampling {
                 int numRejectedItems,
                 int numRejectedInCombiner,
                 double sumOfWeights,
-                boolean useGlobalUpperBound,
                 double upperBound,
                 double q1,
                 double q2) {
-            super(id, selectedSamples, acceptedSamples, numItems, numRejectedItems, sumOfWeights, useGlobalUpperBound, upperBound, q1, q2);
+            super(id, selectedSamples, acceptedSamples, numItems, numRejectedItems, sumOfWeights, upperBound, q1, q2);
             this.inputMappers.addAll(inputMappers);
             this.numRejectedInCombiner = numRejectedInCombiner;
         }
@@ -140,11 +141,10 @@ public class ProbabilityWeightedSampling {
                 int numRejectedItems,
                 int numRejectedInReducer,
                 double sumOfWeights,
-                boolean useGlobalUpperBound,
                 double upperBound,
                 double q1,
                 double q2) {
-            super(id, selectedSamples, acceptedSamples, numItems, numRejectedItems, sumOfWeights, useGlobalUpperBound, upperBound, q1, q2);
+            super(id, selectedSamples, acceptedSamples, numItems, numRejectedItems, sumOfWeights, upperBound, q1, q2);
             this.inputCombiners.addAll(inputCombiners);
             this.finalOutputSamples = finalOutputSamples;
             this.numRejectedInReducer = numRejectedInReducer;
@@ -155,6 +155,13 @@ public class ProbabilityWeightedSampling {
         @Override
         public int compare(Sample s1, Sample s2) {
             return Double.compare(s1.weight, s2.weight);
+        }
+    }
+
+    static class DecreasingSampleWeightComparator implements Comparator<Sample> {
+        @Override
+        public int compare(Sample s1, Sample s2) {
+            return Double.compare(s2.weight, s1.weight);
         }
     }
 
@@ -214,12 +221,20 @@ public class ProbabilityWeightedSampling {
         return q2 / reverseWeightSum;
     }
 
+    // Should avoid creating many random number generator instances.
+    private static RandomDataImpl _RNG = new RandomDataImpl();
+
+    synchronized private static double nextDouble()
+    {
+      return _RNG.nextUniform(0.0d, 1.0d);
+    }
+
     //Simulate Mapper without global weight upper bound
     MapperOutput map(String mapperId,
             List<Sample> samples,
             double p,
             double err) {
-        return map(mapperId, samples, p, err, false, 0);
+        return map(mapperId, samples, p, err, 0);
     }
 
     //Simulate Mapper with gloal weight upper bound
@@ -227,50 +242,42 @@ public class ProbabilityWeightedSampling {
             List<Sample> samples,
             double p,
             double err,
-            boolean useGlobalUpperBound,
             double globalUpperBound) {
         List<Sample> selectedSamples = new ArrayList<Sample>(samples.size());
 
         List<Sample> acceptedSamples = new ArrayList<Sample>();
 
-        double upperBound = (useGlobalUpperBound ? globalUpperBound : 0);
+        double upperBound = globalUpperBound;
 
         double sumOfWeights = 0;
 
-        for (Sample sample : samples) {
-            if (!useGlobalUpperBound) {
-                upperBound = Math.max(sample.weight, upperBound);
-            } else if (Double.compare(sample.weight, globalUpperBound) > 0){
-                throw new IllegalArgumentException("sample [" + sample.id
-                        + "]'s weight [" + sample.weight
-                        + "] is greater than global upper bound: " + globalUpperBound);
-            }
+        int numItems = 0;
+
+        for (Sample sample: samples) {
+            numItems++;
             sumOfWeights += sample.weight;
         }
-
-        double q1 = calculateQ1(sumOfWeights, samples.size(), upperBound, p, err);
-
-        double q2 = calculateQ2(sumOfWeights, samples.size(), upperBound, p, err);
 
         int accepted = 0;
         int selected = 0;
         int rejected = 0;
 
+        double q1 = calculateQ1(sumOfWeights, numItems, upperBound, p, err);
+
+        double q2 = calculateQ2(sumOfWeights, numItems, upperBound, p, err);
+
         for (Sample sample: samples) {
             double score = sample.calculateScore(p, upperBound);
-            if (useGlobalUpperBound) {
-                if (score < q2) {
-                    /*
+            if (score < q2) {
+                /*
                     System.out.println("mapper accept sample id: " + sample.id +
                             ", weight: " + sample.weight +
                             ", score: " + score);
-                    */
-                    accepted++;
-                    acceptedSamples.add(sample);
-                    continue;
-                }
+                 */
+                accepted++;
+                acceptedSamples.add(sample);
             }
-            if (score < q1) {
+            else if (score < q1) {
                 /*
                 System.out.println("mapper selected sample id: " + sample.id +
                         ", weight: " + sample.weight +
@@ -294,7 +301,7 @@ public class ProbabilityWeightedSampling {
                 ", sumOfWeights: " + sumOfWeights +
                 ", upperBound: " + upperBound);
 
-        return new MapperOutput(mapperId, selectedSamples, acceptedSamples, samples.size(), rejected, sumOfWeights, useGlobalUpperBound, upperBound, q1, q2);
+        return new MapperOutput(mapperId, selectedSamples, acceptedSamples, samples.size(), rejected, sumOfWeights, upperBound, q1, q2);
     }
 
     //Simulate combiner
@@ -303,7 +310,6 @@ public class ProbabilityWeightedSampling {
         int numRejectedItems = 0;
         double upperBound = 0;
         double sumOfWeights = 0;
-        boolean useGlobalUpperBound = false;
 
         List<Sample> combinerSelectedSamples = new ArrayList<Sample>();
 
@@ -316,7 +322,6 @@ public class ProbabilityWeightedSampling {
             sumOfWeights += mapperOutput.sumOfWeights;
             numRejectedItems += mapperOutput.numRejectedItems;
             upperBound = Math.max(upperBound, mapperOutput.upperBound);
-            useGlobalUpperBound |= mapperOutput.useGlobalUpperBound;
             aggMapperSelectedSamples.addAll(mapperOutput.selectedSamples);
             combinerAcceptedSamples.addAll(mapperOutput.acceptedSamples);
         }
@@ -342,19 +347,16 @@ public class ProbabilityWeightedSampling {
 
         for (Sample sample: aggMapperSelectedSamples) {
             double score = sample.calculateScore(p, upperBound);
-            if (useGlobalUpperBound) {
-                if (score < q2) {
-                    /*
+            if (score < q2) {
+                /*
                     System.out.println("combiner accept sample id: " + sample.id +
                             ", weight: " + sample.weight +
                             ", score: " + score);
-                    */
-                    accepted++;
-                    combinerAcceptedSamples.add(sample);
-                    continue;
-                }
+                 */
+                accepted++;
+                combinerAcceptedSamples.add(sample);
             }
-            if (score < q1) {
+            else if (score < q1) {
                 /*
                 System.out.println("combiner selected sample id: " + sample.id +
                         ", weight: " + sample.weight +
@@ -384,7 +386,7 @@ public class ProbabilityWeightedSampling {
                 ", upperBound: " + upperBound +
                 ", fromMappers: " + fromMappers);
 
-        return new CombinerOutput(combinerId, mapperOutputs, combinerSelectedSamples, combinerAcceptedSamples, numItems, numRejectedItems + rejected, rejected, sumOfWeights, useGlobalUpperBound, upperBound, q1, q2);
+        return new CombinerOutput(combinerId, mapperOutputs, combinerSelectedSamples, combinerAcceptedSamples, numItems, numRejectedItems + rejected, rejected, sumOfWeights, upperBound, q1, q2);
     }
 
     //Simulate reducer
@@ -393,7 +395,6 @@ public class ProbabilityWeightedSampling {
         int numRejectedItems = 0;
         double upperBound = 0;
         double sumOfWeights = 0;
-        boolean useGlobalUpperBound = false;
 
         List<Sample> reducerSelectedSamples = new ArrayList<Sample>();
 
@@ -405,7 +406,6 @@ public class ProbabilityWeightedSampling {
             numItems += combinerOutput.numItems;
             numRejectedItems += combinerOutput.numRejectedItems;
             sumOfWeights += combinerOutput.sumOfWeights;
-            useGlobalUpperBound |= combinerOutput.useGlobalUpperBound;
             upperBound = Math.max(upperBound, combinerOutput.upperBound);
             aggCombinerSelectedSamples.addAll(combinerOutput.selectedSamples);
             reducerAcceptedSamples.addAll(combinerOutput.acceptedSamples);
@@ -432,19 +432,16 @@ public class ProbabilityWeightedSampling {
 
         for (Sample sample: aggCombinerSelectedSamples) {
             double score = sample.calculateScore(p, upperBound);
-            if (useGlobalUpperBound) {
-                if (score < q2) {
-                    /*
+            if (score < q2) {
+                /*
                     System.out.println("reducer accept sample id: " + sample.id +
                             ", weight: " + sample.weight +
                             ", score: " + score);
-                    */
-                    accepted++;
-                    reducerAcceptedSamples.add(sample);
-                    continue;
-                }
+                 */
+                accepted++;
+                reducerAcceptedSamples.add(sample);
             }
-            if (score < q1) {
+            else if (score < q1) {
                 /*
                 System.out.println("reducer selected sample id: " + sample.id +
                         ", weight: " + sample.weight +
@@ -490,7 +487,7 @@ public class ProbabilityWeightedSampling {
             finalOutputSamples.add(sample);
         }
 
-        return new ReducerOutput(reducerId, combinerOutputs, reducerSelectedSamples, reducerAcceptedSamples, finalOutputSamples, numItems, numRejectedItems + rejected, rejected, sumOfWeights, useGlobalUpperBound, upperBound, q1, q2);
+        return new ReducerOutput(reducerId, combinerOutputs, reducerSelectedSamples, reducerAcceptedSamples, finalOutputSamples, numItems, numRejectedItems + rejected, rejected, sumOfWeights, upperBound, q1, q2);
     }
 
     private static List<Sample> genGaussianInputSamples(int sampleCount) {
@@ -547,6 +544,25 @@ public class ProbabilityWeightedSampling {
         return samples;
     }
 
+    private static List<Sample> genWeightSortedInputSamples(int sampleCount) {
+        List<Sample> samples = new ArrayList<Sample>(sampleCount);
+
+        for (int i = 0; i < sampleCount; i++) {
+            samples.add(new Sample(i, i + 1.0));
+        }
+
+        Collections.sort(samples, new SampleWeightComparator());
+
+        for (int i = 0; i < sampleCount; i++) {
+            samples.get(i).id = i;
+            if (i > 0) {
+                Assert.assertTrue(Double.compare(samples.get(i).weight, samples.get(i - 1).weight) >= 0);
+            }
+        }
+
+        return samples;
+    }
+
     private static List<Sample> genInputSamples(int sampleCount, int sampleType) {
         switch (sampleType) {
             case GAUSSIAN_SAMPLE: return genGaussianInputSamples(sampleCount);
@@ -576,6 +592,25 @@ public class ProbabilityWeightedSampling {
         }
     }
 
+    //generate baseline weight-frequency distribution
+    private static void generateUnWeightedDistribution(List<Sample> samples,
+            double p,
+            Map<Integer, Integer> unweightedSampleCountMap) {
+        List<Sample> orderedSamples = new ArrayList<Sample>(samples.size());
+        for (Sample sample : samples) {
+            sample.calculateUnweightedUniformSampleScore();
+            orderedSamples.add(sample);
+        }
+        Collections.sort(orderedSamples, new SampleScoreComparator());
+        int s = (int)Math.ceil(p * samples.size()); // sample size
+        for (Sample sample: orderedSamples.subList(0, s)) {
+            if (!unweightedSampleCountMap.containsKey(sample.id)) {
+                unweightedSampleCountMap.put(sample.id, 0);
+            }
+            unweightedSampleCountMap.put(sample.id, unweightedSampleCountMap.get(sample.id) + 1);
+        }
+    }
+
     private static final int GAUSSIAN_SAMPLE = 0;
     private static final int UNIFORM_SAMPLE = 1;
     private static final int EQUAL_SAMPLE = 2;
@@ -586,13 +621,13 @@ public class ProbabilityWeightedSampling {
 
         double p = Double.parseDouble(args[1]);
 
-        boolean useGlobalUpperbound = Boolean.parseBoolean(args[2]);
+        int sampleWeightDistribution = Integer.parseInt(args[2]);
 
-        int sampleWeightDistribution = Integer.parseInt(args[3]);
+        String outputFile = args[3];
 
-        String outputFile = args[4];
+        String baselineOutputFile = args[4];
 
-        String baselineOutputFile = args[5];
+        String unweightedOutputFile = args[5];
 
         double err = 0.00001;
 
@@ -601,6 +636,11 @@ public class ProbabilityWeightedSampling {
         Map<Integer, Integer> baselineCountMap = new HashMap<Integer, Integer>();
         for (Sample sample : samples) {
             baselineCountMap.put(sample.id, 0);
+        }
+
+        Map<Integer, Integer> unweightedSampleCountMap = new HashMap<Integer, Integer>();
+        for (Sample sample : samples) {
+            unweightedSampleCountMap.put(sample.id, 0);
         }
 
         Map<Integer, Sample> sampleMap = new HashMap<Integer, Sample>();
@@ -621,20 +661,20 @@ public class ProbabilityWeightedSampling {
         List<Integer> acceptedCounts = new ArrayList<Integer>();
         List<Integer> reducerInputCounts = new ArrayList<Integer>();
 
-        int mappers = 20;
+        int mappers = 200;
 
         int inputNumItemsPerMapper = samples.size() / mappers;
 
-        int combiners = 10;
+        int combiners = 40;
 
-        int reducers = 5;
+        int reducers = 20;
 
         for (int iter = 0; iter < 100; iter++) {
             System.out.println("Iteration {" + iter + "}");
             double globalUpperBound = 0;
             if (iter > 0) {
                 for (Sample sample : samples) {
-                    sample.resetRandomSeed(Math.random());
+                    sample.resetRandomSeed(nextDouble());
                 }
             }
             for (Sample sample: samples) {
@@ -645,7 +685,7 @@ public class ProbabilityWeightedSampling {
             int mapperId = 0;
             for (int i = 0; i < samples.size(); i += inputNumItemsPerMapper) {
                 List<Sample> subSamples = samples.subList(i, Math.min(i + inputNumItemsPerMapper, samples.size()));
-                MapperOutput mapperOutput = sorter.map("mapper-" + mapperId, subSamples, p, err, useGlobalUpperbound, globalUpperBound);
+                MapperOutput mapperOutput = sorter.map("mapper-" + mapperId, subSamples, p, err, globalUpperBound);
                 combinerInputs.add(mapperOutput);
                 mapperId++;
             }
@@ -714,13 +754,17 @@ public class ProbabilityWeightedSampling {
                     globalUpperBound,
                     baselineCountMap,
                     sampleMap);
+
+            if (sampleWeightDistribution == EQUAL_SAMPLE) {
+                generateUnWeightedDistribution(samples, p, unweightedSampleCountMap);
+            }
         }
 
         FileWriter fw = new FileWriter(outputFile);
 
         for (Integer key : countMap.keySet()) {
             //System.out.println(sampleMap.get(key).weight + "\t" + countMap.get(key));
-            fw.write(sampleMap.get(key).weight + "\t" + countMap.get(key));
+            fw.write((sampleWeightDistribution == EQUAL_SAMPLE ? key : sampleMap.get(key).weight) + "\t" + countMap.get(key));
             fw.write("\r\n");
         }
 
@@ -786,11 +830,25 @@ public class ProbabilityWeightedSampling {
 
         for (Integer key : baselineCountMap.keySet()) {
             //System.out.println(sampleMap.get(key).weight + "\t" + countMap.get(key));
-            bfw.write(sampleMap.get(key).weight + "\t" + baselineCountMap.get(key));
+            bfw.write((sampleWeightDistribution == EQUAL_SAMPLE ? key : sampleMap.get(key).weight) + "\t" + baselineCountMap.get(key));
             bfw.write("\r\n");
         }
 
         bfw.close();
+
+        if (sampleWeightDistribution == EQUAL_SAMPLE) {
+
+            FileWriter ufw = new FileWriter(unweightedOutputFile);
+
+            for (Integer key : unweightedSampleCountMap.keySet()) {
+                // System.out.println(sampleMap.get(key).weight + "\t" +
+                // countMap.get(key));
+                ufw.write(key + "\t" + unweightedSampleCountMap.get(key));
+                ufw.write("\r\n");
+            }
+
+            ufw.close();
+        }
     }
 }
 
