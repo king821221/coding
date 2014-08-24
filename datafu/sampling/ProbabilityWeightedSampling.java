@@ -253,20 +253,23 @@ public class ProbabilityWeightedSampling {
 
         int numItems = 0;
 
-        for (Sample sample: samples) {
-            numItems++;
-            sumOfWeights += sample.weight;
-        }
-
         int accepted = 0;
         int selected = 0;
         int rejected = 0;
 
-        double q1 = calculateQ1(sumOfWeights, numItems, upperBound, p, err);
+        double q1 = 1.0;
 
-        double q2 = calculateQ2(sumOfWeights, numItems, upperBound, p, err);
+        double q2 = 0.0;
 
         for (Sample sample: samples) {
+            numItems++;
+
+            sumOfWeights += sample.weight;
+
+            q1 = calculateQ1(sumOfWeights, numItems, upperBound, p, err);
+
+            q2 = calculateQ2(sumOfWeights, numItems, upperBound, p, err);
+
             double score = sample.calculateScore(p, upperBound);
             if (score < q2) {
                 /*
